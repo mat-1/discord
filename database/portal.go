@@ -16,7 +16,7 @@ const (
 	portalSelect = `
 		SELECT dcid, receiver, type, other_user_id, dc_guild_id, dc_parent_id, mxid,
 		       plain_name, name, name_set, topic, topic_set, avatar, avatar_url, avatar_set,
-		       encrypted, in_space, first_event_id
+		       encrypted, in_space, first_event_id, batch_id, has_more_history
 		FROM portal
 	`
 )
@@ -116,17 +116,19 @@ type Portal struct {
 	Encrypted bool
 	InSpace   id.RoomID
 
-	FirstEventID id.EventID
+	FirstEventID   id.EventID
+	BatchID        id.BatchID
+	HasMoreHistory bool
 }
 
 func (p *Portal) Scan(row dbutil.Scannable) *Portal {
-	var otherUserID, guildID, parentID, mxid, firstEventID sql.NullString
+	var otherUserID, guildID, parentID, mxid sql.NullString
 	var chanType int32
 	var avatarURL string
 
 	err := row.Scan(&p.Key.ChannelID, &p.Key.Receiver, &chanType, &otherUserID, &guildID, &parentID,
 		&mxid, &p.PlainName, &p.Name, &p.NameSet, &p.Topic, &p.TopicSet, &p.Avatar, &avatarURL, &p.AvatarSet,
-		&p.Encrypted, &p.InSpace, &firstEventID)
+		&p.Encrypted, &p.InSpace, &p.FirstEventID, &p.BatchID, &p.HasMoreHistory)
 
 	if err != nil {
 		if err != sql.ErrNoRows {
@@ -142,7 +144,6 @@ func (p *Portal) Scan(row dbutil.Scannable) *Portal {
 	p.GuildID = guildID.String
 	p.ParentID = parentID.String
 	p.Type = discordgo.ChannelType(chanType)
-	p.FirstEventID = id.EventID(firstEventID.String)
 	p.AvatarURL, _ = id.ParseContentURI(avatarURL)
 
 	return p
@@ -152,13 +153,13 @@ func (p *Portal) Insert() {
 	query := `
 		INSERT INTO portal (dcid, receiver, type, other_user_id, dc_guild_id, dc_parent_id, mxid,
 		                    plain_name, name, name_set, topic, topic_set, avatar, avatar_url, avatar_set,
-		                    encrypted, in_space, first_event_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+		                    encrypted, in_space, first_event_id, batch_id, has_more_history)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 	`
 	_, err := p.db.Exec(query, p.Key.ChannelID, p.Key.Receiver, p.Type,
 		strPtr(p.OtherUserID), strPtr(p.GuildID), strPtr(p.ParentID), strPtr(string(p.MXID)),
 		p.PlainName, p.Name, p.NameSet, p.Topic, p.TopicSet, p.Avatar, p.AvatarURL.String(), p.AvatarSet,
-		p.Encrypted, p.InSpace, p.FirstEventID.String())
+		p.Encrypted, p.InSpace, p.FirstEventID.String(), p.BatchID.String(), p.HasMoreHistory)
 
 	if err != nil {
 		p.log.Warnfln("Failed to insert %s: %v", p.Key, err)
@@ -171,13 +172,13 @@ func (p *Portal) Update() {
 		UPDATE portal
 		SET type=$1, other_user_id=$2, dc_guild_id=$3, dc_parent_id=$4, mxid=$5,
 			plain_name=$6, name=$7, name_set=$8, topic=$9, topic_set=$10, avatar=$11, avatar_url=$12, avatar_set=$13,
-			encrypted=$14, in_space=$15, first_event_id=$16
-		WHERE dcid=$17 AND receiver=$18
+			encrypted=$14, in_space=$15, first_event_id=$16, batch_id=$17, has_more_history=$18
+		WHERE dcid=$19 AND receiver=$20
 	`
 	_, err := p.db.Exec(query,
 		p.Type, strPtr(p.OtherUserID), strPtr(p.GuildID), strPtr(p.ParentID), strPtr(string(p.MXID)),
 		p.PlainName, p.Name, p.NameSet, p.Topic, p.TopicSet, p.Avatar, p.AvatarURL.String(), p.AvatarSet,
-		p.Encrypted, p.InSpace, p.FirstEventID.String(),
+		p.Encrypted, p.InSpace, p.FirstEventID.String(), p.BatchID.String(), p.HasMoreHistory,
 		p.Key.ChannelID, p.Key.Receiver)
 
 	if err != nil {

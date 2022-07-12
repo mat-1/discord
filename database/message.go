@@ -61,6 +61,11 @@ func (mq *MessageQuery) GetLastByDiscordID(key PortalKey, discordID string) *Mes
 	return mq.New().Scan(mq.db.QueryRow(query, key.ChannelID, key.Receiver, discordID))
 }
 
+func (mq *MessageQuery) GetFirstInChat(key PortalKey) *Message {
+	query := messageSelect + " WHERE dc_chan_id=$1 AND dc_chan_receiver=$2 AND dc_thread_id='' AND dc_edit_index=0 ORDER BY dcid ASC, dc_attachment_id ASC LIMIT 1"
+	return mq.New().Scan(mq.db.QueryRow(query, key.ChannelID, key.Receiver))
+}
+
 func (mq *MessageQuery) GetClosestBefore(key PortalKey, ts time.Time) *Message {
 	query := messageSelect + " WHERE dc_chan_id=$1 AND dc_chan_receiver=$2 AND timestamp<=$3 ORDER BY timestamp DESC, dc_attachment_id DESC LIMIT 1"
 	return mq.New().Scan(mq.db.QueryRow(query, key.ChannelID, key.Receiver, ts.UnixMilli()))
@@ -175,6 +180,49 @@ func (m *Message) MassInsert(msgs []MessagePart) {
 	_, err := m.db.Exec(fmt.Sprintf(messageMassInsertTemplate, strings.Join(placeholders, ", ")), params...)
 	if err != nil {
 		m.log.Warnfln("Failed to insert %d parts of %s@%s: %v", len(msgs), m.DiscordID, m.Channel, err)
+		panic(err)
+	}
+}
+
+type PartialMessage struct {
+	DiscordID    string
+	AttachmentID string
+	EditIndex    int
+	SenderID     string
+	Timestamp    time.Time
+	MXID         id.EventID
+}
+
+func (mq *MessageQuery) MassInsert(portal PortalKey, threadID string, msgs []PartialMessage) {
+	if len(msgs) == 0 {
+		return
+	}
+	for len(msgs) > 100 {
+		mq.MassInsert(portal, threadID, msgs[:100])
+		msgs = msgs[100:]
+	}
+	valueStringFormat := "($%d, $%d, $%d, $1, $2, $%d, $%d, $3, $%d)"
+	if mq.db.Dialect == dbutil.SQLite {
+		valueStringFormat = strings.ReplaceAll(valueStringFormat, "$", "?")
+	}
+	params := make([]interface{}, 3+len(msgs)*6)
+	placeholders := make([]string, len(msgs))
+	params[0] = portal.ChannelID
+	params[1] = portal.Receiver
+	params[2] = threadID
+	for i, msg := range msgs {
+		offset := 3 + i*6
+		params[offset] = msg.DiscordID
+		params[offset+1] = msg.AttachmentID
+		params[offset+2] = msg.EditIndex
+		params[offset+3] = msg.SenderID
+		params[offset+4] = msg.Timestamp.UnixMilli()
+		params[offset+5] = msg.MXID
+		placeholders[i] = fmt.Sprintf(valueStringFormat, offset+1, offset+2, offset+3, offset+4, offset+5, offset+6)
+	}
+	_, err := mq.db.Exec(fmt.Sprintf(messageMassInsertTemplate, strings.Join(placeholders, ", ")), params...)
+	if err != nil {
+		mq.log.Warnfln("Failed to insert %d messages in %s/%s: %v", len(msgs), portal, threadID, err)
 		panic(err)
 	}
 }

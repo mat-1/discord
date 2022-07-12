@@ -49,6 +49,7 @@ func (br *DiscordBridge) RegisterCommands() {
 		cmdGuilds,
 		cmdRejoinSpace,
 		cmdDeleteAllPortals,
+		cmdBackfill,
 	)
 }
 
@@ -371,4 +372,29 @@ func fnDeleteAllPortals(ce *WrappedCommandEvent) {
 		}
 		ce.Reply("Finished background cleanup of deleted portal rooms.")
 	}()
+}
+
+var cmdBackfill = &commands.FullHandler{
+	Func: wrapCommand(fnBackfill),
+	Name: "backfill",
+	Help: commands.HelpMeta{
+		Section:     commands.HelpSectionUnclassified,
+		Description: "Backfill messages in the current portal.",
+		Args:        "<_number of pages_>",
+	},
+	RequiresPortal: true,
+	RequiresLogin:  true,
+}
+
+func fnBackfill(ce *WrappedCommandEvent) {
+	if len(ce.Args) == 0 {
+		ce.Reply("**Usage**: `$cmdprefix backfill <number of pages>`")
+		return
+	}
+	pages, err := strconv.Atoi(ce.Args[0])
+	if err != nil || pages < 1 {
+		ce.Reply("**Usage**: `$cmdprefix backfill <number of pages>`")
+		return
+	}
+	ce.Portal.BackfillHistoryChunks(ce.User, pages)
 }

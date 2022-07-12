@@ -825,6 +825,137 @@ func (portal *Portal) handleDiscordMessageDelete(user *User, msg *discordgo.Mess
 	}
 }
 
+func (portal *Portal) BackfillHistoryChunks(user *User, number int) {
+	if !portal.HasMoreHistory {
+		return
+	}
+	firstMessage := portal.bridge.DB.Message.GetFirstInChat(portal.Key)
+	var beforeMsgID string
+	const limit = 50
+	if firstMessage != nil {
+		beforeMsgID = firstMessage.DiscordID
+	}
+	// This list is newest to oldest
+	var messages []*discordgo.Message
+	for i := 0; i < number; i++ {
+		resp, err := user.Session.ChannelMessages(portal.Key.ChannelID, limit, beforeMsgID, "", "")
+		if err != nil {
+			portal.log.Errorfln("Failed to fetch messages before %q through %s for backfill: %v", beforeMsgID, user.MXID, err)
+			return
+		}
+		messages = append(messages, resp...)
+		beforeMsgID = resp[len(resp)-1].ID
+		if len(resp) < limit {
+			portal.HasMoreHistory = false
+			break
+		}
+	}
+	portal.log.Debugfln("Got %d messages through %s for backfilling", len(messages), user.MXID)
+	portal.batchSend(user, messages, portal.FirstEventID, false)
+}
+
+func (portal *Portal) batchSend(user *User, messages []*discordgo.Message, prevEventID id.EventID, forward bool) {
+	req := mautrix.ReqBatchSend{
+		PrevEventID:       prevEventID,
+		BeeperNewMessages: forward,
+	}
+	if !forward {
+		req.BatchID = portal.BatchID
+	}
+	req.StateEventsAtStart = make([]*event.Event, 0)
+
+	firstMessageTS, _ := discordgo.SnowflakeTimestamp(messages[len(messages)-1].ID)
+	beforeFirstMessageTimestampMillis := firstMessageTS.UnixMilli() - 1
+	addedMembers := make(map[id.UserID]struct{})
+	addMember := func(mxid id.UserID, name string, avatar id.ContentURI) {
+		if _, alreadyAdded := addedMembers[mxid]; alreadyAdded {
+			return
+		}
+		content := event.MemberEventContent{
+			Membership:  event.MembershipJoin,
+			Displayname: name,
+			AvatarURL:   avatar.CUString(),
+		}
+		inviteContent := content
+		inviteContent.Membership = event.MembershipInvite
+		stateKey := mxid.String()
+		req.StateEventsAtStart = append(req.StateEventsAtStart, &event.Event{
+			Type:      event.StateMember,
+			Sender:    portal.MainIntent().UserID,
+			StateKey:  &stateKey,
+			Timestamp: beforeFirstMessageTimestampMillis,
+			Content:   event.Content{Parsed: &inviteContent},
+		}, &event.Event{
+			Type:      event.StateMember,
+			Sender:    mxid,
+			StateKey:  &stateKey,
+			Timestamp: beforeFirstMessageTimestampMillis,
+			Content:   event.Content{Parsed: &content},
+		})
+		addedMembers[mxid] = struct{}{}
+	}
+
+	dbMessages := make([]database.PartialMessage, 0, len(messages))
+	req.Events = make([]*event.Event, 0, len(messages))
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		ts, _ := discordgo.SnowflakeTimestamp(msg.ID)
+		puppet := portal.bridge.GetPuppetByID(msg.Author.ID)
+		puppet.UpdateInfo(user, msg.Author)
+		intent := puppet.IntentFor(portal)
+		if intent.IsCustomPuppet && !portal.bridge.Config.CanDoublePuppetBackfill(intent.UserID) {
+			intent = puppet.DefaultIntent()
+		}
+		addMember(intent.UserID, puppet.Name, puppet.AvatarURL)
+		for _, part := range portal.convertDiscordMessage(intent, msg) {
+			wrappedContent := event.Content{
+				Parsed: part.Content,
+			}
+			eventType, err := portal.encrypt(intent, &wrappedContent, part.Type)
+			if err != nil {
+				portal.log.Errorln("Error encrypting %s/%s while backfilling: %v", msg.ID, part.AttachmentID)
+				continue
+			}
+			intent.AddDoublePuppetValue(&wrappedContent)
+			req.Events = append(req.Events, &event.Event{
+				Sender:    intent.UserID,
+				Type:      eventType,
+				Timestamp: ts.UnixMilli(),
+				Content:   wrappedContent,
+			})
+			dbMessages = append(dbMessages, database.PartialMessage{
+				DiscordID:    msg.ID,
+				AttachmentID: part.AttachmentID,
+				SenderID:     msg.Author.ID,
+				Timestamp:    ts,
+			})
+		}
+	}
+	if len(req.Events) != len(dbMessages) {
+		panic(fmt.Errorf("backfill data length mismatch: %d != %d", len(req.Events), len(dbMessages)))
+	} else if len(req.Events) == 0 {
+		portal.log.Warnfln("Didn't get any Matrix events to batch send out of %d messages", len(dbMessages))
+		return
+	}
+	resp, err := portal.MainIntent().BatchSend(portal.MXID, &req)
+	if err != nil {
+		portal.log.Errorln("Failed to batch send %d events: %v", len(dbMessages), err)
+		return
+	} else if len(resp.EventIDs) != len(dbMessages) {
+		portal.log.Errorln("Unexpected batch send response: got %d event IDs, even though we sent %d messages", len(resp.EventIDs), len(dbMessages))
+		return
+	}
+	if !forward && resp.NextBatchID != "" {
+		portal.BatchID = resp.NextBatchID
+	}
+	for i, evtID := range resp.EventIDs {
+		dbMessages[i].MXID = evtID
+	}
+	portal.bridge.DB.Message.MassInsert(portal.Key, "", dbMessages)
+	portal.Update()
+	portal.log.Infofln("Successfully batch sent %d events", len(dbMessages))
+}
+
 func (portal *Portal) syncParticipants(source *User, participants []*discordgo.User) {
 	for _, participant := range participants {
 		puppet := portal.bridge.GetPuppetByID(participant.ID)
@@ -1245,6 +1376,13 @@ func (portal *Portal) RemoveMXID() {
 	}
 	delete(portal.bridge.portalsByMXID, portal.MXID)
 	portal.MXID = ""
+	portal.InSpace = ""
+	portal.BatchID = ""
+	portal.FirstEventID = ""
+	portal.HasMoreHistory = true
+	portal.AvatarSet = false
+	portal.NameSet = false
+	portal.Encrypted = false
 	portal.Update()
 	portal.bridge.DB.Message.DeleteAll(portal.Key)
 }

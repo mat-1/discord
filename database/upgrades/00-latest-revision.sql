@@ -1,4 +1,4 @@
--- v0 -> v8: Latest revision
+-- v0 -> v9: Latest revision
 
 CREATE TABLE guild (
     dcid       TEXT PRIMARY KEY,
@@ -37,7 +37,9 @@ CREATE TABLE portal (
     encrypted  BOOLEAN NOT NULL,
     in_space   TEXT NOT NULL,
 
-    first_event_id TEXT NOT NULL,
+    first_event_id   TEXT NOT NULL,
+    batch_id         TEXT NOT NULL,
+    has_more_history BOOLEAN NOT NULL,
 
     PRIMARY KEY (dcid, receiver),
     CONSTRAINT portal_parent_fkey FOREIGN KEY (dc_parent_id, dc_parent_receiver) REFERENCES portal (dcid, receiver) ON DELETE CASCADE,

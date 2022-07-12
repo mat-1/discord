@@ -34,6 +34,8 @@
       * [ ] Backfilling threads after joining
     * [x] Custom emojis
   * [ ] Message history
+    * [x] Manually with `!discord backfill`
+    * [ ] Automatically in background
   * [x] Message deletions
   * [x] Reactions
     * [x] Unicode emojis

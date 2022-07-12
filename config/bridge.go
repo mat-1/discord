@@ -37,6 +37,10 @@ type BridgeConfig struct {
 
 	PortalMessageBuffer int `yaml:"portal_message_buffer"`
 
+	Backfill struct {
+		Enable          bool `yaml:"enable"`
+		UseDoublePuppet bool `yaml:"use_double_puppet"`
+	} `yaml:"backfill"`
 	DeliveryReceipts            bool `yaml:"delivery_receipts"`
 	MessageStatusEvents         bool `yaml:"message_status_events"`
 	MessageErrorNotices         bool `yaml:"message_error_notices"`

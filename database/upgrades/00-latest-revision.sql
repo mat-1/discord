@@ -39,6 +39,7 @@ CREATE TABLE portal (
 
     first_event_id   TEXT NOT NULL,
     batch_id         TEXT NOT NULL,
+    insertion_id     TEXT NOT NULL,
     has_more_history BOOLEAN NOT NULL,
 
     PRIMARY KEY (dcid, receiver),

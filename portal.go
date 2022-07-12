@@ -945,8 +945,16 @@ func (portal *Portal) batchSend(user *User, messages []*discordgo.Message, prevE
 		portal.log.Errorln("Unexpected batch send response: got %d event IDs, even though we sent %d messages", len(resp.EventIDs), len(dbMessages))
 		return
 	}
-	if !forward && resp.NextBatchID != "" {
-		portal.BatchID = resp.NextBatchID
+	insertionID := resp.BaseInsertionEventID
+	if !forward {
+		if resp.NextBatchID != "" {
+			portal.BatchID = resp.NextBatchID
+		}
+		if resp.BaseInsertionEventID != "" {
+			portal.InsertionID = resp.BaseInsertionEventID
+		} else {
+			insertionID = portal.InsertionID
+		}
 	}
 	for i, evtID := range resp.EventIDs {
 		dbMessages[i].MXID = evtID
@@ -954,6 +962,14 @@ func (portal *Portal) batchSend(user *User, messages []*discordgo.Message, prevE
 	portal.bridge.DB.Message.MassInsert(portal.Key, "", dbMessages)
 	portal.Update()
 	portal.log.Infofln("Successfully batch sent %d events", len(dbMessages))
+
+	_, err = portal.MainIntent().SendStateEvent(portal.MXID, event.StateInsertionMarker, insertionID.String(), &event.InsertionMarkerContent{
+		InsertionID: insertionID,
+		Timestamp:   time.Now().UnixMilli(),
+	})
+	if err != nil {
+		portal.log.Warnfln("Failed to send marker event after batch send: %v", err)
+	}
 }
 
 func (portal *Portal) syncParticipants(source *User, participants []*discordgo.User) {
@@ -1378,6 +1394,7 @@ func (portal *Portal) RemoveMXID() {
 	portal.MXID = ""
 	portal.InSpace = ""
 	portal.BatchID = ""
+	portal.InsertionID = ""
 	portal.FirstEventID = ""
 	portal.HasMoreHistory = true
 	portal.AvatarSet = false

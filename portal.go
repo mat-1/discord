@@ -991,7 +991,7 @@ var (
 	errUnknownEmoji                = errors.New("unknown emoji")
 )
 
-func errorToStatusReason(err error) (reason event.MessageStatusReason, isCertain, canRetry, sendNotice bool) {
+func errorToStatusReason(err error) (reason event.MessageStatusReason, status event.MessageStatus, isCertain, sendNotice bool, message string) {
 	switch {
 	case errors.Is(err, errUnknownMsgType),
 		errors.Is(err, errUnknownRelationType),
@@ -1000,19 +1000,19 @@ func errorToStatusReason(err error) (reason event.MessageStatusReason, isCertain
 		errors.Is(err, id.InvalidContentURI),
 		errors.Is(err, attachment.UnsupportedVersion),
 		errors.Is(err, attachment.UnsupportedAlgorithm):
-		return event.MessageStatusUnsupported, true, false, true
+		return event.MessageStatusUnsupported, event.MessageStatusFail, true, true, ""
 	case errors.Is(err, attachment.HashMismatch),
 		errors.Is(err, attachment.InvalidKey),
 		errors.Is(err, attachment.InvalidInitVector):
-		return event.MessageStatusUndecryptable, true, false, true
+		return event.MessageStatusUndecryptable, event.MessageStatusFail, true, true, ""
 	case errors.Is(err, errUserNotReceiver):
-		return event.MessageStatusNoPermission, true, false, false
+		return event.MessageStatusNoPermission, event.MessageStatusFail, true, false, ""
 	case errors.Is(err, errUnknownEditTarget):
-		return event.MessageStatusGenericError, true, false, false
+		return event.MessageStatusGenericError, event.MessageStatusFail, true, false, ""
 	case errors.Is(err, errTargetNotFound):
-		return event.MessageStatusGenericError, true, false, true
+		return event.MessageStatusGenericError, event.MessageStatusFail, true, true, ""
 	default:
-		return event.MessageStatusGenericError, false, true, true
+		return event.MessageStatusGenericError, event.MessageStatusRetriable, false, true, ""
 	}
 }
 
@@ -1032,15 +1032,14 @@ func (portal *Portal) sendStatusEvent(evtID id.EventID, err error) {
 			Type:    event.RelReference,
 			EventID: evtID,
 		},
-		Success: err == nil,
 	}
-	if !content.Success {
-		reason, isCertain, canRetry, _ := errorToStatusReason(err)
-		content.Reason = reason
-		content.IsCertain = &isCertain
-		content.CanRetry = &canRetry
+	if err == nil {
+		content.Status = event.MessageStatusSuccess
+	} else {
+		content.Reason, content.Status, _, _, content.Message = errorToStatusReason(err)
 		content.Error = err.Error()
 	}
+	content.FillLegacyBooleans()
 	_, err = intent.SendMessageEvent(portal.MXID, event.BeeperMessageStatus, &content)
 	if err != nil {
 		portal.log.Warnln("Failed to send message status event:", err)
@@ -1069,8 +1068,8 @@ func (portal *Portal) sendMessageMetrics(evt *event.Event, err error, part strin
 			level = log.LevelDebug
 		}
 		portal.log.Logfln(level, "%s %s %s from %s: %v", part, msgType, evtDescription, evt.Sender, err)
-		reason, isCertain, _, sendNotice := errorToStatusReason(err)
-		status := bridge.ReasonToCheckpointStatus(reason)
+		reason, msgStatus, isCertain, sendNotice, _ := errorToStatusReason(err)
+		status := bridge.ReasonToCheckpointStatus(reason, msgStatus)
 		portal.bridge.SendMessageCheckpoint(evt, bridge.MsgStepRemote, err, status, 0)
 		if sendNotice {
 			portal.sendErrorMessage(msgType, err.Error(), isCertain)

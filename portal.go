@@ -493,34 +493,36 @@ func (portal *Portal) markMessageHandled(discordID string, editIndex int, author
 	msg.MassInsert(parts)
 }
 
-func (portal *Portal) sendMediaFailedMessage(intent *appservice.IntentAPI, bridgeErr error) {
-	content := &event.MessageEventContent{
+func (portal *Portal) makeMediaFailedMessage(bridgeErr error) event.MessageEventContent {
+	return event.MessageEventContent{
 		Body:    fmt.Sprintf("Failed to bridge media: %v", bridgeErr),
 		MsgType: event.MsgNotice,
-	}
-
-	_, err := portal.sendMatrixMessage(intent, event.EventMessage, content, nil, 0)
-	if err != nil {
-		portal.log.Warnfln("Failed to send media error message to matrix: %v", err)
 	}
 }
 
 const DiscordStickerSize = 160
 
-func (portal *Portal) handleDiscordFile(typeName string, intent *appservice.IntentAPI, id, url string, content *event.MessageEventContent, ts time.Time, threadRelation *event.RelatesTo) *database.MessagePart {
+type ConvertedMessagePart struct {
+	Type         event.Type
+	Content      *event.MessageEventContent
+	AttachmentID string
+}
+
+func (portal *Portal) convertDiscordFile(typeName string, intent *appservice.IntentAPI, url string, content *event.MessageEventContent) {
 	data, err := portal.downloadDiscordAttachment(url)
 	if err != nil {
-		portal.sendMediaFailedMessage(intent, err)
-		return nil
+		*content = portal.makeMediaFailedMessage(err)
+		portal.log.Warnfln("Failed to download %s: %v", url, err)
+		return
 	}
 
 	err = portal.uploadMatrixAttachment(intent, data, content)
 	if err != nil {
-		portal.sendMediaFailedMessage(intent, err)
-		return nil
+		*content = portal.makeMediaFailedMessage(err)
+		portal.log.Warnfln("Failed to reupload %s: %v", url, err)
+		return
 	}
 
-	evtType := event.EventMessage
 	if typeName == "sticker" && (content.Info.Width > DiscordStickerSize || content.Info.Height > DiscordStickerSize) {
 		if content.Info.Width > content.Info.Height {
 			content.Info.Height /= content.Info.Width / DiscordStickerSize
@@ -532,25 +534,10 @@ func (portal *Portal) handleDiscordFile(typeName string, intent *appservice.Inte
 			content.Info.Width = DiscordStickerSize
 			content.Info.Height = DiscordStickerSize
 		}
-		evtType = event.EventSticker
-	}
-
-	resp, err := portal.sendMatrixMessage(intent, evtType, content, nil, ts.UnixMilli())
-	if err != nil {
-		portal.log.Warnfln("Failed to send %s to Matrix: %v", typeName, err)
-		return nil
-	}
-	// Update the fallback reply event for the next attachment
-	if threadRelation != nil {
-		threadRelation.InReplyTo.EventID = resp.EventID
-	}
-	return &database.MessagePart{
-		AttachmentID: id,
-		MXID:         resp.EventID,
 	}
 }
 
-func (portal *Portal) handleDiscordSticker(intent *appservice.IntentAPI, sticker *discordgo.Sticker, ts time.Time, threadRelation *event.RelatesTo) *database.MessagePart {
+func (portal *Portal) convertDiscordSticker(intent *appservice.IntentAPI, sticker *discordgo.Sticker) ConvertedMessagePart {
 	var mime string
 	switch sticker.FormatType {
 	case discordgo.StickerFormatTypePNG:
@@ -565,12 +552,16 @@ func (portal *Portal) handleDiscordSticker(intent *appservice.IntentAPI, sticker
 		Info: &event.FileInfo{
 			MimeType: mime,
 		},
-		RelatesTo: threadRelation,
 	}
-	return portal.handleDiscordFile("sticker", intent, sticker.ID, sticker.URL(), content, ts, threadRelation)
+	portal.convertDiscordFile("sticker", intent, sticker.URL(), content)
+	return ConvertedMessagePart{
+		Type:         event.EventSticker,
+		Content:      content,
+		AttachmentID: sticker.ID,
+	}
 }
 
-func (portal *Portal) handleDiscordAttachment(intent *appservice.IntentAPI, att *discordgo.MessageAttachment, ts time.Time, threadRelation *event.RelatesTo) *database.MessagePart {
+func (portal *Portal) convertDiscordAttachment(intent *appservice.IntentAPI, att *discordgo.MessageAttachment) ConvertedMessagePart {
 	// var captionContent *event.MessageEventContent
 
 	// if att.Description != "" {
@@ -591,7 +582,6 @@ func (portal *Portal) handleDiscordAttachment(intent *appservice.IntentAPI, att 
 			// This gets overwritten later after the file is uploaded to the homeserver
 			Size: att.Size,
 		},
-		RelatesTo: threadRelation,
 	}
 
 	switch strings.ToLower(strings.Split(att.ContentType, "/")[0]) {
@@ -604,7 +594,12 @@ func (portal *Portal) handleDiscordAttachment(intent *appservice.IntentAPI, att 
 	default:
 		content.MsgType = event.MsgFile
 	}
-	return portal.handleDiscordFile("attachment", intent, att.ID, att.URL, content, ts, threadRelation)
+	portal.convertDiscordFile("attachment", intent, att.URL, content)
+	return ConvertedMessagePart{
+		Type:         event.EventMessage,
+		Content:      content,
+		AttachmentID: att.ID,
+	}
 }
 
 func (portal *Portal) handleDiscordMessageCreate(user *User, msg *discordgo.Message, thread *Thread) {
@@ -648,23 +643,53 @@ func (portal *Portal) handleDiscordMessageCreate(user *User, msg *discordgo.Mess
 	puppet.UpdateInfo(user, msg.Author)
 	intent := puppet.IntentFor(portal)
 
-	var threadRelation *event.RelatesTo
 	var threadID string
+	var threadRootID, lastInThreadID id.EventID
 	if thread != nil {
 		threadID = thread.ID
-		lastEventID := thread.RootMXID
+		threadRootID = thread.RootMXID
 		lastInThread := portal.bridge.DB.Message.GetLastInThread(portal.Key, thread.ID)
 		if lastInThread != nil {
-			lastEventID = lastInThread.MXID
+			lastInThreadID = lastInThread.MXID
+		} else {
+			lastInThreadID = thread.RootMXID
 		}
-		threadRelation = (&event.RelatesTo{}).SetThread(thread.RootMXID, lastEventID)
 	}
 
-	var parts []database.MessagePart
+	parts := portal.convertDiscordMessage(intent, msg)
+	if len(parts) == 0 {
+		portal.log.Warnfln("Unhandled message %s", msg.ID)
+		return
+	}
 	ts, _ := discordgo.SnowflakeTimestamp(msg.ID)
+	dbParts := make([]database.MessagePart, 0, len(parts))
+	for _, part := range parts {
+		if threadRootID != "" {
+			part.Content.RelatesTo.SetThread(threadRootID, lastInThreadID)
+		}
+		resp, err := portal.sendMatrixMessage(intent, part.Type, part.Content, nil, ts.UnixMilli())
+		if err != nil {
+			portal.log.Errorln("Failed to send part %q of %s: %v", part.AttachmentID, msg.ID, err)
+		} else {
+			lastInThreadID = resp.EventID
+			dbParts = append(dbParts, database.MessagePart{
+				AttachmentID: part.AttachmentID,
+				MXID:         resp.EventID,
+			})
+		}
+	}
+	if len(dbParts) > 0 {
+		go portal.sendDeliveryReceipt(dbParts[len(dbParts)-1].MXID)
+		portal.markMessageHandled(msg.ID, 0, msg.Author.ID, ts, threadID, dbParts)
+	} else {
+		portal.log.Warnfln("All parts of %s failed to send", msg.ID)
+	}
+}
+
+func (portal *Portal) convertDiscordMessage(intent *appservice.IntentAPI, msg *discordgo.Message) []ConvertedMessagePart {
+	var parts []ConvertedMessagePart
 	if msg.Content != "" {
 		content := portal.renderDiscordMarkdown(msg.Content)
-		content.RelatesTo = threadRelation.Copy()
 
 		if msg.MessageReference != nil {
 			//key := database.PortalKey{msg.MessageReference.ChannelID, user.ID}
@@ -677,36 +702,18 @@ func (portal *Portal) handleDiscordMessageCreate(user *User, msg *discordgo.Mess
 			}
 		}
 
-		resp, err := portal.sendMatrixMessage(intent, event.EventMessage, &content, nil, ts.UnixMilli())
-		if err != nil {
-			portal.log.Warnfln("Failed to send message %s to matrix: %v", msg.ID, err)
-			return
-		}
-
-		parts = append(parts, database.MessagePart{MXID: resp.EventID})
-		// Update the fallback reply event for attachments
-		if threadRelation != nil {
-			threadRelation.InReplyTo.EventID = resp.EventID
-		}
-		go portal.sendDeliveryReceipt(resp.EventID)
+		parts = append(parts, ConvertedMessagePart{
+			Type:    event.EventMessage,
+			Content: &content,
+		})
 	}
 	for _, att := range msg.Attachments {
-		part := portal.handleDiscordAttachment(intent, att, ts, threadRelation)
-		if part != nil {
-			parts = append(parts, *part)
-		}
+		parts = append(parts, portal.convertDiscordAttachment(intent, att))
 	}
 	for _, sticker := range msg.StickerItems {
-		part := portal.handleDiscordSticker(intent, sticker, ts, threadRelation)
-		if part != nil {
-			parts = append(parts, *part)
-		}
+		parts = append(parts, portal.convertDiscordSticker(intent, sticker))
 	}
-	if len(parts) == 0 {
-		portal.log.Warnfln("Unhandled message %s", msg.ID)
-	} else {
-		portal.markMessageHandled(msg.ID, 0, msg.Author.ID, ts, threadID, parts)
-	}
+	return parts
 }
 
 func (portal *Portal) handleDiscordMessageUpdate(user *User, msg *discordgo.Message) {

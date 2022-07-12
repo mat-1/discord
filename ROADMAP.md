@@ -33,6 +33,7 @@
       * [ ] Auto-joining threads
       * [ ] Backfilling threads after joining
     * [x] Custom emojis
+  * [ ] Message history
   * [x] Message deletions
   * [x] Reactions
     * [x] Unicode emojis

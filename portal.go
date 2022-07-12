@@ -913,7 +913,7 @@ func (portal *Portal) batchSend(user *User, messages []*discordgo.Message, prevE
 			}
 			eventType, err := portal.encrypt(intent, &wrappedContent, part.Type)
 			if err != nil {
-				portal.log.Errorln("Error encrypting %s/%s while backfilling: %v", msg.ID, part.AttachmentID)
+				portal.log.Errorfln("Error encrypting %s/%s while backfilling: %v", msg.ID, part.AttachmentID)
 				continue
 			}
 			intent.AddDoublePuppetValue(&wrappedContent)
@@ -939,10 +939,10 @@ func (portal *Portal) batchSend(user *User, messages []*discordgo.Message, prevE
 	}
 	resp, err := portal.MainIntent().BatchSend(portal.MXID, &req)
 	if err != nil {
-		portal.log.Errorln("Failed to batch send %d events: %v", len(dbMessages), err)
+		portal.log.Errorfln("Failed to batch send %d events: %v", len(dbMessages), err)
 		return
 	} else if len(resp.EventIDs) != len(dbMessages) {
-		portal.log.Errorln("Unexpected batch send response: got %d event IDs, even though we sent %d messages", len(resp.EventIDs), len(dbMessages))
+		portal.log.Errorfln("Unexpected batch send response: got %d event IDs, even though we sent %d messages", len(resp.EventIDs), len(dbMessages))
 		return
 	}
 	insertionID := resp.BaseInsertionEventID

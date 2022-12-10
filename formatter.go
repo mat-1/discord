@@ -107,7 +107,7 @@ var discordMarkdownEscaper = strings.NewReplacer(
 	`<`, `\<`,
 )
 
-var discordMarkdownUnscaper = regexp.MustCompile(`\\(.)`);
+var discordMarkdownUnscaper = regexp.MustCompile(`\\(.)`)
 
 func escapeDiscordMarkdown(s string) string {
 	submatches := discordLinkRegex.FindAllStringIndex(s, -1)
@@ -141,10 +141,10 @@ var matrixHTMLParser = &format.HTMLParser{
 		s = discordMarkdownUnscaper.ReplaceAllString(s, "$1")
 		pre := ""
 		suf := ""
-		if (strings.HasPrefix(s, "`")) {
+		if strings.HasPrefix(s, "`") {
 			pre = " "
 		}
-		if (strings.HasSuffix(s, "`")) {
+		if strings.HasSuffix(s, "`") {
 			suf = " "
 		}
 		return fmt.Sprintf("``%s%s%s``", pre, s, suf)
